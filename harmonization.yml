@@ -1,0 +1,233 @@
+name: HKI Data Harmonization
+
+on:
+  # Automated schedule - choose one by uncommenting
+  schedule:
+    # Weekly: Every Monday at 6:00 AM UTC
+    - cron: '0 6 * * 1'
+    
+    # Bi-weekly: 1st and 15th of each month at 6:00 AM UTC
+    # - cron: '0 6 1,15 * *'
+    
+    # Monthly: First day of each month at 6:00 AM UTC
+    # - cron: '0 6 1 * *'
+  
+  # Manual trigger option for testing
+  workflow_dispatch:
+    inputs:
+      systems_to_run:
+        description: 'Which systems to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - pecs
+          - im
+          - im_supervision
+
+# Ensure only one instance runs at a time
+concurrency:
+  group: hki-harmonization
+  cancel-in-progress: false
+
+jobs:
+  harmonize-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2 hour timeout for large datasets
+    
+    # Use environment for additional security
+    environment: production
+    
+    steps:
+    # Step 1: Checkout repository
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    # Step 2: Set up Python
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+    
+    # Step 3: Cache dependencies for faster runs
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    # Step 4: Install dependencies
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas==1.5.3 requests==2.28.2 numpy==1.24.3 office365-REST-Python-Client==2.4.0 openpyxl==3.1.2
+        pip install jupyter nbconvert  # For PECS notebook conversion
+    
+    # Step 5: Convert PECS notebook to Python script
+    - name: Convert PECS notebook to script
+      if: ${{ github.event.inputs.systems_to_run == 'all' || github.event.inputs.systems_to_run == 'pecs' }}
+      run: |
+        jupyter nbconvert --to script PECS_Data_Harmonization.ipynb --output run_pecs_harmonization
+        
+        # Add credential handling to the converted script
+        python - <<EOF
+        import re
+        
+        # Read the converted script
+        with open('run_pecs_harmonization.py', 'r') as f:
+            content = f.read()
+        
+        # Replace hardcoded credentials with environment variables
+        content = re.sub(
+            r'SURVEYCTO_USERNAME\s*=\s*["\'].*?["\']',
+            'SURVEYCTO_USERNAME = os.environ.get("SURVEYCTO_USERNAME")',
+            content
+        )
+        content = re.sub(
+            r'SURVEYCTO_PASSWORD\s*=\s*["\'].*?["\']',
+            'SURVEYCTO_PASSWORD = os.environ.get("SURVEYCTO_PASSWORD")',
+            content
+        )
+        content = re.sub(
+            r'SHAREPOINT_USERNAME\s*=\s*["\'].*?["\']',
+            'SHAREPOINT_USERNAME = os.environ.get("SHAREPOINT_USERNAME")',
+            content
+        )
+        content = re.sub(
+            r'SHAREPOINT_PASSWORD\s*=\s*["\'].*?["\']',
+            'SHAREPOINT_PASSWORD = os.environ.get("SHAREPOINT_PASSWORD")',
+            content
+        )
+        
+        # Add import os at the beginning if not present
+        if 'import os' not in content:
+            content = 'import os\n' + content
+        
+        # Write back the modified script
+        with open('run_pecs_harmonization.py', 'w') as f:
+            f.write(content)
+        EOF
+    
+    # Step 6: Run PECS Harmonization
+    - name: Run PECS Harmonization
+      if: ${{ github.event.inputs.systems_to_run == 'all' || github.event.inputs.systems_to_run == 'pecs' }}
+      env:
+        SURVEYCTO_USERNAME: ${{ secrets.SURVEYCTO_USERNAME }}
+        SURVEYCTO_PASSWORD: ${{ secrets.SURVEYCTO_PASSWORD }}
+        SHAREPOINT_USERNAME: ${{ secrets.SHAREPOINT_USERNAME }}
+        SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
+        SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
+      run: |
+        echo "Starting PECS Data Harmonization..."
+        python run_pecs_harmonization.py
+      continue-on-error: true
+    
+    # Step 7: Run IM Harmonization
+    - name: Run IM Harmonization
+      if: ${{ github.event.inputs.systems_to_run == 'all' || github.event.inputs.systems_to_run == 'im' }}
+      env:
+        SURVEYCTO_USERNAME: ${{ secrets.SURVEYCTO_USERNAME }}
+        SURVEYCTO_PASSWORD: ${{ secrets.SURVEYCTO_PASSWORD }}
+        SHAREPOINT_USERNAME: ${{ secrets.SHAREPOINT_USERNAME }}
+        SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
+        SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
+      run: |
+        echo "Starting Independent Monitoring Harmonization..."
+        python IM_Data_Harmonization.py
+      continue-on-error: true
+    
+    # Step 8: Run IM Supervision Harmonization
+    - name: Run IM Supervision Harmonization
+      if: ${{ github.event.inputs.systems_to_run == 'all' || github.event.inputs.systems_to_run == 'im_supervision' }}
+      env:
+        SURVEYCTO_USERNAME: ${{ secrets.SURVEYCTO_USERNAME }}
+        SURVEYCTO_PASSWORD: ${{ secrets.SURVEYCTO_PASSWORD }}
+        SHAREPOINT_USERNAME: ${{ secrets.SHAREPOINT_USERNAME }}
+        SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
+        SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
+      run: |
+        echo "Starting IM Supervision Harmonization..."
+        python IM_Supervision_Harmonization.py
+      continue-on-error: true
+    
+    # Step 9: Create summary report
+    - name: Create execution summary
+      if: always()
+      run: |
+        echo "# HKI Data Harmonization Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Run Date**: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "**Triggered By**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Systems Status" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -f "run_pecs_harmonization.py" ]; then
+          echo "✅ PECS: Script generated" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ PECS: Script generation failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Check the individual step logs for detailed information." >> $GITHUB_STEP_SUMMARY
+    
+    # Step 10: Upload logs as artifacts (for debugging)
+    - name: Upload execution logs
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: error-logs-${{ github.run_number }}
+        path: |
+          *.log
+          *.txt
+        retention-days: 30
+    
+    # Step 11: Send notification on failure
+    - name: Send failure notification
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const issue = await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Data Harmonization Failed - ${new Date().toISOString().split('T')[0]}`,
+            body: `The automated data harmonization workflow failed.\n\nRun ID: ${context.runId}\n\nPlease check the [workflow logs](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+            labels: ['automation', 'error']
+          });
+
+# Additional workflow for credential rotation reminder
+---
+name: Security - Credential Rotation Reminder
+
+on:
+  schedule:
+    # Run on the 1st of every third month at 9 AM UTC
+    - cron: '0 9 1 */3 *'
+  
+  workflow_dispatch:
+
+jobs:
+  credential-reminder:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Create credential rotation issue
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const today = new Date().toISOString().split('T')[0];
+          const issue = await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Security: Credential Rotation Due - ${today}`,
+            body: `## Quarterly Credential Rotation Reminder\n\nIt's time to rotate the following credentials:\n\n- [ ] SurveyCTO Password\n- [ ] SharePoint Password\n\n### Steps:\n1. Update passwords in respective systems\n2. Update GitHub Secrets:\n   - \`SURVEYCTO_PASSWORD\`\n   - \`SHAREPOINT_PASSWORD\`\n3. Test with manual workflow run\n4. Close this issue when complete\n\n**Due Date**: Within 7 days\n\n---\n*This is an automated security reminder.*`,
+            labels: ['security', 'maintenance'],
+            assignees: ['data-team-lead']  # Replace with actual GitHub username
+          });
