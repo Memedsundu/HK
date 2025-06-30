@@ -1,4 +1,3 @@
-# HK
 # HKI Data Harmonization Systems
 
 ## Overview
